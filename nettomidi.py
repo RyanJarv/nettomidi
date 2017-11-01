@@ -1,65 +1,107 @@
 #!/usr/bin/env python
+from __future__ import print_function
+
 from scapy.all import *
-from midiutil import MIDIFile
 import time
+import sys
 
-root  = 48
-octaves  =  4
+import rtmidi
 
-scale    = [0, 2, 4, 5, 7, 9, 11]
+# Works around windows issue
+# https://stackoverflow.com/questions/40793615/scapy-windows-sniff-log-runtime-is-not-defined
+from scapy.arch.windows import compatibility
+from scapy.all import log_runtime, MTU, ETH_P_ALL, PcapTimeoutElapsed, plist
 
-NOTES = []
-for octave in range(1, octaves + 1):
-    NOTES += map(lambda x: x * octave + root, scale)
+compatibility.log_runtime = log_runtime
+compatibility.MTU = MTU
+compatibility.PcapTimeoutElapsed = PcapTimeoutElapsed
+compatibility.ETH_P_ALL = ETH_P_ALL
+compatibility.plist = plist
 
-track    = 0
-channel  = 0
-start    = time.time()
-tempo    = 600  # In BPM
 
-min_duration = 1   # In beats
-max_duration = 30   # In beats
+class Track:
+    root = 48
+    octaves = 4
+    scale = []
+    scale=[0, 2, 4, 5, 7, 9, 11]
+    min_duration = 0.2
+    max_duration = 1.0
+    min_volume = 0
+    max_volume = 100
+    fade = 200000
+    filter = ""
+    notes = []
 
-min_volume   = 0 # 0-127, as per the MIDI standard
-max_volume   = 100
+    tcp_start_seq = {}
 
-tcp_start_seq = {}
-fade = 2000
+    def __init__(self):
+        for octave in range(1, self.octaves + 1):
+            self.notes += map(lambda x: x * octave + self.root, self.scale)
 
-def addnote(p):
-    global start, NOTES
-    beat = int((time.time() - start) * tempo/60)
+    def start(self):
+        sniff(filter=self.filter, prn=track.packet_note)
 
-    try:
-        src = p[IP].src
-    except IndexError:
-        return
+    def packet_note(self, p):
+        note = IPNote(track)
 
-    pitch = int(src.replace('.', ''))
-    pitch = NOTES[pitch % len(NOTES)]
+        note.ip_source(p[IP].src)
+        note.ip_length(int(p.sprintf('%IP.len%')))
 
-    duration = (int(p.sprintf('%IP.len%')) / 1500) * (max_duration - min_duration) + min_duration
+        try:
+            p[TCP]
+            seq = long(p.sprintf('%TCP.seq%'))
+            if (note.src_ip not in self.tcp_start_seq) or (seq < self.tcp_start_seq[note.src_ip]):
+                self.tcp_start_seq[note.src_ip] = seq
+            note.seq(seq - self.tcp_start_seq[note.src_ip])
+            print(seq - self.tcp_start_seq[note.src_ip])
+        except IndexError:
+            print('.')
+            note.volume = self.max_volume + self.min_volume / 2
 
-    try:
-        seq = int(p.sprintf('%TCP.seq%'))
-        if (src not in tcp_start_seq) or (seq < tcp_start_seq[src]):
-            tcp_start_seq[src] = seq
-        seq = seq - tcp_start_seq[src]
-        volume = max((fade - seq)/float(fade), 0) * (max_volume - min_volume) + min_volume
-    # May not be TCP
-    except ValueError:
-        volume = max_volume + min_volume / 2
+        note.play()
 
-    MyMIDI.addNote(track, channel, pitch, beat, duration, int(volume))
+class IPNote:
+    volume = 0
+    pitch = 0
+    duration = 0
+    src_ip = ''
 
-MyMIDI = MIDIFile(1) # One track, defaults to format 1 (tempo track
-                     # automatically created)
-MyMIDI.addTempo(track, 0, tempo)
+    def __init__(self, track):
+        self.track = track
+
+    def ip_length(self, length):
+        self.duration = (length / 1500) * (self.track.max_duration - self.track.min_duration) + self.track.min_duration
+
+    def ip_source(self, ip):
+        self.src_ip = ip
+        self.pitch = int(ip.replace('.', ''))
+        self.pitch = self.track.notes[self.pitch % len(self.track.notes)]
+
+    def seq(self, seq):
+        self.volume = max((self.track.fade - seq)/float(self.track.fade), 0) * (self.track.max_volume - self.track.min_volume) + self.track.min_volume
+
+    def play(self):
+        self.send_on()
+        time.sleep(self.duration)
+        self.send_off()
+
+    def send_on(self):
+        midiout.send_message([0x90, self.pitch, self.volume])
+
+    def send_off(self):
+        midiout.send_message([0x80, self.pitch])
+
+midiout = rtmidi.MidiOut()
+
+if not len(midiout.get_ports()) >= 2:
+    print("Only one port found (should be two?)")
+
+midiout.open_port(1)
+print(midiout.get_ports())
+
+track = Track()
 
 try:
-    sniff(prn=addnote)
+    track.start()
 except KeyboardInterrupt:
     pass
-
-with open("major-scale.mid", "wb") as output_file:
-    MyMIDI.writeFile(output_file)
