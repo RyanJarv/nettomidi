@@ -7,6 +7,7 @@ Uses scapy and python-rtmidi to interpret network traffic as MIDI.
 * Python 2.7
 * wpcap driver (wireshark)
 * loopMIDI https://www.tobias-erichsen.de/software/loopmidi.html (windows only)
+* admin privileges (TODO: don't require this)
 
 ### Installing
 
